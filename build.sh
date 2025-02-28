@@ -1,6 +1,6 @@
 #!/bin/bash -e
 
-BUILD_CONFIG=release
+BUILD_CONFIG=RelWithDebInfo
 RUN_CMAKE="no"
 ROOT_DIR=$(readlink -f $(dirname $0))
 VERBOSE_ARGS=""
