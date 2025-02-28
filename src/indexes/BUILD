@@ -188,6 +188,7 @@ cc_library(
         "//src:attribute_data_type",
         "//src:metrics",
         "//src:rdb_io_stream",
+        "//src:rdb_serialization",
         "//src/utils:string_interning",
         "//third_party/hnswlib:hnswlib_vmsdk",
         "//vmsdk/src:log",

@@ -55,6 +55,7 @@
 #include "src/indexes/vector_base.h"
 #include "src/metrics.h"
 #include "src/rdb_io_stream.h"
+#include "src/rdb_serialization.h"
 #include "src/utils/string_interning.h"
 #include "vmsdk/src/log.h"
 #include "vmsdk/src/status/status_macros.h"
@@ -111,7 +112,8 @@ template <typename T>
 absl::StatusOr<std::shared_ptr<VectorFlat<T>>> VectorFlat<T>::LoadFromRDB(
     RedisModuleCtx *ctx, const AttributeDataType *attribute_data_type,
     const data_model::VectorIndex &vector_index_proto,
-    RDBInputStream &rdb_stream, absl::string_view attribute_identifier) {
+    absl::string_view attribute_identifier, SupplementalContentChunkIter begin,
+    SupplementalContentChunkIter end) {
   try {
     auto index = std::shared_ptr<VectorFlat<T>>(new VectorFlat<T>(
         vector_index_proto.dimension_count(),
@@ -122,18 +124,9 @@ absl::StatusOr<std::shared_ptr<VectorFlat<T>>> VectorFlat<T>::LoadFromRDB(
                 vector_index_proto.distance_metric(), index->space_);
     index->algo_ =
         std::make_unique<hnswlib::BruteforceSearch<T>>(index->space_.get());
+    RDBChunkInputStream input(begin, end);
     VMSDK_RETURN_IF_ERROR(
-        index->algo_->LoadIndex(rdb_stream, index->space_.get(), index.get()));
-    if (vector_index_proto.has_tracked_keys()) {
-      VMSDK_RETURN_IF_ERROR(index->LoadTrackedKeys(
-          ctx, attribute_data_type, vector_index_proto.tracked_keys()));
-      VMSDK_RETURN_IF_ERROR(
-          index->ConsumeKeysAndInternalIdsForBackCompat(rdb_stream));
-    } else {
-      // Previous versions stored tracked keys in the index contents.
-      VMSDK_RETURN_IF_ERROR(
-          index->LoadKeysAndInternalIds(ctx, attribute_data_type, rdb_stream));
-    }
+        index->algo_->LoadIndex(input, index->space_.get(), index.get()));
     return index;
   } catch (const std::exception &e) {
     ++Metrics::GetStats().flat_create_exceptions_cnt;

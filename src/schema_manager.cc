@@ -608,9 +608,9 @@ absl::Status SchemaManager::RemoveAll() {
   return absl::OkStatus();
 }
 
-absl::StatusOr<IndexSchema *> SchemaManager::StageIndexFromRDB(
-    RedisModuleCtx *ctx, RedisModuleIO *rdb, int encver) {
-  auto rdb_is = RDBInputStream(rdb);
+absl::StatusOr<IndexSchema *> SchemaManager::LoadIndex(
+    RedisModuleCtx *ctx, data_model::RDBSection section,
+    SupplementalContentIter begin, SupplementalContentIter end) {
   VMSDK_ASSIGN_OR_RETURN(
       auto index_schema,
       IndexSchema::LoadFromRDB(rdb_is, ctx, index_schema_module_type_,
@@ -624,6 +624,10 @@ absl::StatusOr<IndexSchema *> SchemaManager::StageIndexFromRDB(
   staged_db_to_index_schemas_.Get()[db_num][name] = std::move(index_schema);
   return index_schema_ptr;
 }
+
+absl::Status SchemaManagerRDBSectionLoadCallback(data_model::RDBSection section,
+                                                 SupplementalContentIter begin,
+                                                 SupplementalContentIter end) {}
 
 absl::Status SchemaManager::StageIndicesFromAux(RedisModuleCtx *ctx,
                                                 int aux_index_schema_count,
@@ -809,51 +813,6 @@ void *SchemaManagerIndexSchemaRDBLoad(RedisModuleIO *rdb,
   }
   Metrics::GetStats().rdb_load_success_cnt++;
   return *res;
-}
-
-// This module type is used purely to get aux callbacks.
-absl::Status SchemaManager::RegisterModuleType(RedisModuleCtx *ctx) {
-  VMSDK_ASSIGN_OR_RETURN(
-      index_schema_module_type_,
-      IndexSchema::CreateModuleType(ctx, SchemaManagerIndexSchemaRDBLoad));
-  static RedisModuleTypeMethods tm = {
-      .version = REDISMODULE_TYPE_METHOD_VERSION,
-      .rdb_load = [](RedisModuleIO *io, int encver) -> void * {
-        DCHECK(false) << "Attempt to load SchemaManager from RDB";
-        return nullptr;
-      },
-      .rdb_save =
-          [](RedisModuleIO *io, void *value) {
-            DCHECK(false) << "Attempt to save SchemaManager to RDB";
-          },
-      .aof_rewrite =
-          [](RedisModuleIO *aof, RedisModuleString *key, void *value) {
-            DCHECK(false) << "Attempt to rewrite SchemaManager to AOF";
-          },
-      .free =
-          [](void *value) {
-            DCHECK(false) << "Attempt to free SchemaManager object";
-          },
-      .aux_load = SchemaManagerOnAuxLoadCallback,
-      // We want to save/load the metadata after the RDB.
-      .aux_save_triggers = REDISMODULE_AUX_AFTER_RDB,
-      // TODO(b/349436336) On Cluster mode, we don't need to maintain
-      // backwards & forwards compatibility with previous versions, so we can
-      // do the RDB aux save. For standalone, we can't save it or rollback
-      // would fail, as the previous version doesn't know how to process it.
-      // Once we have rolled out support fleetwide, we can switch to aux for
-      // both.
-      .aux_save2 =
-          coordinator_enabled_ ? SchemaManagerOnAuxSaveCallback : nullptr,
-  };
-
-  auto schema_manager_module_type_ = RedisModule_CreateDataType(
-      ctx, kSchemaManagerModuleTypeName.data(), kEncodingVersion, &tm);
-  if (!schema_manager_module_type_) {
-    return absl::InternalError(absl::StrCat(
-        "failed to create ", kSchemaManagerModuleTypeName, " type"));
-  }
-  return absl::OkStatus();
 }
 
 }  // namespace valkey_search

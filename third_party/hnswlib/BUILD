@@ -60,3 +60,13 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
     ],
 )
+
+proto_library(
+    name = "index_proto",
+    srcs = ["index.proto"],
+)
+
+cc_proto_library(
+    name = "index_cc_proto",
+    deps = [":index_proto"],
+)

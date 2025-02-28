@@ -64,6 +64,7 @@
 #include "src/keyspace_event_manager.h"
 #include "src/metrics.h"
 #include "src/rdb_io_stream.h"
+#include "src/rdb_serialization.h"
 #include "src/utils/string_interning.h"
 #include "src/vector_externalizer.h"
 #include "vmsdk/src/log.h"
@@ -98,8 +99,8 @@ IndexSchema::BackfillJob::BackfillJob(RedisModuleCtx *ctx,
 absl::StatusOr<std::shared_ptr<indexes::IndexBase>> IndexFactory(
     RedisModuleCtx *ctx, IndexSchema *index_schema,
     const data_model::Attribute &attribute,
-    std::optional<RDBInputStream *> rdb_stream,
-    data_model::AttributeDataType attribute_data_type) {
+    data_model::AttributeDataType attribute_data_type,
+    SupplementalContentChunkIter begin, SupplementalContentChunkIter end) {
   const auto &index = attribute.index();
   switch (index.index_type_case()) {
     case data_model::Index::IndexTypeCase::kTagIndex: {
@@ -113,15 +114,13 @@ absl::StatusOr<std::shared_ptr<indexes::IndexBase>> IndexFactory(
         case data_model::VectorIndex::kHnswAlgorithm: {
           switch (index.vector_index().vector_data_type()) {
             case data_model::VECTOR_DATA_TYPE_FLOAT32: {
-              // TODO: Create an empty index in case of an error
-              // loading the index contents from RDB.
               VMSDK_ASSIGN_OR_RETURN(
                   auto index,
-                  (rdb_stream.has_value())
+                  (begin != end)
                       ? indexes::VectorHNSW<float>::LoadFromRDB(
                             ctx, &index_schema->GetAttributeDataType(),
-                            index.vector_index(), *rdb_stream.value(),
-                            attribute.identifier())
+                            index.vector_index(), attribute.identifier(), begin,
+                            end)
                       : indexes::VectorHNSW<float>::Create(
                             index.vector_index(), attribute.identifier(),
                             attribute_data_type));
@@ -142,11 +141,11 @@ absl::StatusOr<std::shared_ptr<indexes::IndexBase>> IndexFactory(
               // loading the index contents from RDB.
               VMSDK_ASSIGN_OR_RETURN(
                   auto index,
-                  (rdb_stream.has_value())
+                  (begin != end)
                       ? indexes::VectorFlat<float>::LoadFromRDB(
                             ctx, &index_schema->GetAttributeDataType(),
-                            index.vector_index(), *rdb_stream.value(),
-                            attribute.identifier())
+                            index.vector_index(), attribute.identifier(), begin,
+                            end)
                       : indexes::VectorFlat<float>::Create(
                             index.vector_index(), attribute.identifier(),
                             attribute_data_type));
@@ -870,67 +869,27 @@ absl::Status IndexSchema::RDBSave(RDBOutputStream &rdb_stream) const {
 }
 
 absl::StatusOr<std::shared_ptr<IndexSchema>> IndexSchema::LoadFromRDB(
-    RDBInputStream &rdb_stream, RedisModuleCtx *ctx,
-    RedisModuleType *module_type, vmsdk::ThreadPool *mutations_thread_pool,
-    const int encoding_version) {
-  if (encoding_version != kEncodingVersion) {
-    return absl::InvalidArgumentError("Unsupported encoding version.");
-  }
-  VMSDK_ASSIGN_OR_RETURN(
-      auto serialized_index_schema, rdb_stream.LoadString(),
-      _ << "IO error while reading serialized IndexSchema from RDB");
-  auto index_schema_proto = std::make_unique<data_model::IndexSchema>();
-  if (!index_schema_proto->ParseFromString(
-          std::string(vmsdk::ToStringView(serialized_index_schema.get())))) {
-    return absl::InvalidArgumentError(
-        "Failed to deserialize index schema read from RDB");
-  }
-
-  // TODO(b/332974693): This is temporary logic added to allow upgrading from
-  // a prior RDB format to the new RDB format. Remove this logic after the
-  // migration. The stats field was added only with the new RDB format. All
-  // RDBs generated with the new format will have the stats field populated.
-  bool load_index_contents = index_schema_proto->has_stats();
-
-  auto stats = (load_index_contents)
-                   ? std::make_unique<data_model::IndexSchema_Stats>(
-                         index_schema_proto->stats())
-                   : nullptr;
-  if (load_index_contents) {
-    // Clear the attributes, we will load these from the RDB afterwards
-    // with the data from the RDB.
-    index_schema_proto->clear_attributes();
-  }
-  if (!index_schema_proto->has_db_num()) {
-    // Prior to setting the DB number, we inferred this based on the context.
-    // TODO(b/349436336) Remove after rollout
-    index_schema_proto->set_db_num(RedisModule_GetSelectedDb(ctx));
-  }
-
+    RedisModuleCtx *ctx, vmsdk::ThreadPool *mutations_thread_pool,
+    data_model::IndexSchema index_schema_proto, SupplementalContentIter begin,
+    SupplementalContentIter end) {
+  // Begin by loading an empty IndexSchema with no attributes.
+  index_schema_proto.clear_attributes();
   VMSDK_ASSIGN_OR_RETURN(
       auto index_schema,
       IndexSchema::Create(ctx, *index_schema_proto, module_type,
                           mutations_thread_pool, std::move(stats)));
-
-  if (load_index_contents) {
-    unsigned int attributes_count;
-    VMSDK_RETURN_IF_ERROR(rdb_stream.LoadUnsigned(attributes_count))
-        << "IO error while reading attributes count from RDB";
-
-    for (size_t i = 0; i < attributes_count; ++i) {
-      VMSDK_ASSIGN_OR_RETURN(
-          auto serialized_attribute, rdb_stream.LoadString(),
-          _ << "IO error while reading attribute metadata from RDB");
-      auto attribute = std::make_unique<data_model::Attribute>();
-      if (!attribute->ParseFromString(
-              std::string(vmsdk::ToStringView(serialized_attribute.get())))) {
-        return absl::InvalidArgumentError(
-            "Failed to deserialize attribute metadata read from RDB");
-      }
+  for (auto iter = begin; begin != end; begin++) {
+    VMSDK_ASSIGN_OR_RETURN(auto supplemental_content, *iter);
+    if (supplemental_content.type() ==
+        data_model::SupplementalContentType::
+            SUPPLEMENTAL_CONTENT_TYPE_INDEX_CONTENT) {
+      auto index_content_header = supplemental_content.index_content_header();
+      auto attribute = index_content_header.attribute();
       VMSDK_ASSIGN_OR_RETURN(
           std::shared_ptr<indexes::IndexBase> index,
-          IndexFactory(ctx, index_schema.get(), *attribute, &rdb_stream,
-                       index_schema->GetAttributeDataType().ToProto()));
+          IndexFactory(ctx, index_schema.get(), attribute,
+                       index_schema->GetAttributeDataType().ToProto(),
+                       iter.ChunkBegin(), iter.ChunkEnd()));
       VMSDK_RETURN_IF_ERROR(index_schema->AddIndex(
           attribute->alias(), attribute->identifier(), index));
     }

@@ -11,7 +11,7 @@ package(
 )
 
 # To include the symbol table, specific parameters are required:
-#    --strip=never --config=online_debug_backtraces
+#    --strip = never--config = online_debug_backtraces
 # For a release build, add the following parameter: --config=release
 redis_module_library(
     name = "valkeysearch",
@@ -46,7 +46,7 @@ cc_library(
     ],
     linkopts = [
         # The Redis module SDK defines many global variables in the header file
-        # which violates One Definition Rule (ODR). This causes linker errors
+        # which violates One Definition Rule(ODR).This causes linker errors
         # if we don't allow multiple definitions.
         "-z muldefs",
     ],
@@ -143,7 +143,7 @@ cc_library(
         ":index_schema_cc_proto",
         ":keyspace_event_manager",
         ":metrics",
-        ":rdb_io_stream",
+        ":rdb_serialization",
         ":vector_externalizer",
         "//src/indexes:index_base",
         "//src/indexes:numeric",
@@ -196,20 +196,6 @@ cc_library(
 )
 
 cc_library(
-    name = "rdb_io_stream",
-    hdrs = ["rdb_io_stream.h"],
-    deps = [
-        "//third_party/hnswlib:iostream",
-        "//vmsdk/src:managed_pointers",
-        "//vmsdk/src/valkey_module_api:valkey_module",
-        "@com_google_absl//absl/log:check",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings:string_view",
-    ],
-)
-
-cc_library(
     name = "schema_manager",
     srcs = ["schema_manager.cc"],
     hdrs = ["schema_manager.h"],
@@ -217,7 +203,6 @@ cc_library(
         ":index_schema",
         ":index_schema_cc_proto",
         ":metrics",
-        ":rdb_io_stream",
         ":vector_externalizer",
         "//src/coordinator:coordinator_cc_proto",
         "//src/coordinator:metadata_manager",
@@ -281,4 +266,35 @@ proto_library(
 cc_proto_library(
     name = "index_schema_cc_proto",
     deps = [":index_schema_proto"],
+)
+
+proto_library(
+    name = "rdb_section_proto",
+    srcs = ["rdb_section.proto"],
+    deps = [
+        "index_schema_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "rdb_section_cc_proto",
+    deps = [":rdb_section_proto"],
+)
+
+cc_library(
+    name = "rdb_serialization",
+    srcs = ["rdb_serialization.cc"],
+    hdrs = ["rdb_serialization.h"],
+    deps = [
+        ":rdb_section_cc_proto",
+        "//third_party/hnswlib:iostream",
+        "//vmsdk/src:managed_pointers",
+        "//vmsdk/src:utils",
+        "//vmsdk/src/valkey_module_api:valkey_module",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
+    ],
 )
